@@ -169,6 +169,11 @@ encoder_funcs_t* init_twolame( const char* format, int channels, int bitrate )
 		return NULL;
 	}
 
+	if ( 0 > twolame_set_energy_levels( twolame_opts, TRUE) ) {
+		rotter_error("TwoLAME error: failed to set energy levels on.");
+		return NULL;
+	}
+
 	if ( 0 > twolame_init_params( twolame_opts ) ) {
 		rotter_error("TwoLAME error: failed to initialize parameters.");
 		return NULL;
