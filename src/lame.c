@@ -224,6 +224,11 @@ encoder_funcs_t* init_lame( const char* format, int channels, int bitrate )
 		return NULL;
 	}
 
+	if ( 0 > lame_set_disable_reservoir( lame_opts, 1) ) {
+		rotter_error("lame error: failed to disable reservoir.");
+		return NULL;
+	}
+
 	if ( 0 > lame_init_params( lame_opts ) ) {
 		rotter_error("lame error: failed to initialize parameters.");
 		return NULL;
