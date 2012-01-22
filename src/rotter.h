@@ -103,8 +103,10 @@ extern jack_ringbuffer_t *ringbuffer[2];
 extern jack_client_t *client;
 extern time_t file_start;
 extern output_format_map_t format_map[];
+extern int utc;				// Use UTC rather than local time
 extern int running;			// True while still running
 extern int channels;			// Number of input channels
+extern int sample_rate;			// Input sample rate in hertz
 extern float rb_duration;		// Duration of ring buffer
 extern int ringbuffer_overflow;		// Flag to indigate that a ringbuffer overflowed
 

@@ -161,8 +161,11 @@ void init_jack( const char* client_name, jack_options_t jack_opt )
 		}
 	}
 	
+	// Store input sample rate
+	sample_rate = jack_get_sample_rate( client );;
+
 	// Create ring buffers
-	ringbuffer_size = jack_get_sample_rate( client ) * rb_duration * sizeof(float);
+	ringbuffer_size = sample_rate * rb_duration * sizeof(float);
 	rotter_debug("Size of the ring buffers is %2.2f seconds (%d bytes).", rb_duration, (int)ringbuffer_size );
 	for(i=0; i<channels; i++) {
 		if (!(ringbuffer[i] = jack_ringbuffer_create( ringbuffer_size ))) {

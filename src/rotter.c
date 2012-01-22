@@ -51,8 +51,10 @@ int quiet = 0;					// Only display error messages
 int verbose = 0;				// Increase number of logging messages
 char* file_layout = DEFAULT_FILE_LAYOUT;	// File layout: Flat files or folder hierarchy ?
 char* archive_name = NULL;			// Archive file name
+int utc = 0;					// Use UTC rather than local time
 int running = 1;				// True while still running
 int channels = DEFAULT_CHANNELS;		// Number of input channels
+int sample_rate;				// Input sample rate; set by init_jack()
 float rb_duration = DEFAULT_RB_LEN;		// Duration of ring buffer
 char *root_directory = NULL;			// Root directory of archives
 int delete_hours = DEFAULT_DELETE_HOURS;	// Delete files after this many hours
@@ -159,13 +161,16 @@ void rotter_log( RotterLogLevel level, const char* fmt, ... )
 
 
 // Returns unix timestamp for the start of this hour
-static time_t start_of_hour()
+static time_t start_of_hour(time_t now)
 {
 	struct tm tm;
-	time_t now = time(NULL);
 	
 	// Break down the time
-	localtime_r( &now, &tm );
+	if(utc) {
+		gmtime_r( &now, &tm );
+	} else {
+		localtime_r( &now, &tm );
+	}
 
 	// Set minutes and seconds to 0
 	tm.tm_min = 0;
@@ -234,12 +239,17 @@ static int mkdir_p( const char* dir )
 }
 
 
-static char * time_to_filepath_flat( time_t clock, const char* suffix )
+static char * time_to_filepath_flat( struct timespec *clock, const char* suffix )
 {
 	struct tm tm;
 	char* filepath = malloc( MAX_FILEPATH_LEN );
 	
-	localtime_r( &clock, &tm );
+	
+	if(utc) {
+		gmtime_r( &clock->tv_sec, &tm );
+	} else {
+		localtime_r( &clock->tv_sec, &tm );
+	}
 	
 	if (archive_name) {
 		// Create the full file path
@@ -255,13 +265,17 @@ static char * time_to_filepath_flat( time_t clock, const char* suffix )
 }
 
 
-static char * time_to_filepath_hierarchy( time_t clock, const char* suffix )
+static char * time_to_filepath_hierarchy( struct timespec *clock, const char* suffix )
 {
 	struct tm tm;
 	char* filepath = malloc( MAX_FILEPATH_LEN );
 	
 	
-	localtime_r( &clock, &tm );
+	if(utc) {
+		gmtime_r( &clock->tv_sec, &tm );
+	} else {
+		localtime_r( &clock->tv_sec, &tm );
+	}
 	
 	// Make sure the parent directories exists
 	snprintf( filepath, MAX_FILEPATH_LEN, "%s/%4.4d/%2.2d/%2.2d/%2.2d",
@@ -285,13 +299,17 @@ static char * time_to_filepath_hierarchy( time_t clock, const char* suffix )
 }
 
 
-static char * time_to_filepath_combo( time_t clock, const char* suffix )
+static char * time_to_filepath_combo( struct timespec *clock, const char* suffix )
 {
 	struct tm tm;
 	char* filepath = malloc( MAX_FILEPATH_LEN );
 	
 	
-	localtime_r( &clock, &tm );
+	if(utc) {
+		gmtime_r( &clock->tv_sec, &tm );
+	} else {
+		localtime_r( &clock->tv_sec, &tm );
+	}
 	
 	// Make sure the parent directories exists
 	snprintf( filepath, MAX_FILEPATH_LEN, "%s/%4.4d/%2.2d/%2.2d/%2.2d",
@@ -313,13 +331,17 @@ static char * time_to_filepath_combo( time_t clock, const char* suffix )
 	return filepath;
 }
 
-static char * time_to_filepath_dailydir( time_t clock, const char* suffix )
+static char * time_to_filepath_dailydir( struct timespec *clock, const char* suffix )
 {
 	struct tm tm;
 	char* filepath = malloc( MAX_FILEPATH_LEN );
 	
 	
-	localtime_r( &clock, &tm );
+	if(utc) {
+		gmtime_r( &clock->tv_sec, &tm );
+	} else {
+		localtime_r( &clock->tv_sec, &tm );
+	}
 	
 	// Make sure the parent directories exists
 	snprintf( filepath, MAX_FILEPATH_LEN, "%s/%4.4d-%2.2d-%2.2d",
@@ -341,25 +363,76 @@ static char * time_to_filepath_dailydir( time_t clock, const char* suffix )
 	return filepath;
 }
 
+static char * time_to_filepath_accurate( struct timespec *clock, const char* suffix )
+{
+	struct tm tm;
+	char* filepath = malloc( MAX_FILEPATH_LEN );
+	
+	
+	if(utc) {
+		gmtime_r( &clock->tv_sec, &tm );
+	} else {
+		localtime_r( &clock->tv_sec, &tm );
+	}
+	
+	// Make sure the parent directories exists
+	snprintf( filepath, MAX_FILEPATH_LEN, "%s/%4.4d-%2.2d-%2.2d",
+				root_directory, tm.tm_year+1900, tm.tm_mon+1, tm.tm_mday );
+
+	if (mkdir_p( filepath ))
+		rotter_fatal( "Failed to create directory (%s): %s", filepath, strerror(errno) );
+
+
+	// Create the full file path
+	if (archive_name) {
+		snprintf( filepath, MAX_FILEPATH_LEN, "%s/%4.4d-%2.2d-%2.2d/%s-%4.4d-%2.2d-%2.2d-%2.2d.%s",
+					root_directory, tm.tm_year+1900, tm.tm_mon+1, tm.tm_mday, archive_name, tm.tm_year+1900, tm.tm_mon+1, tm.tm_mday, tm.tm_hour, suffix );
+	} else {
+		snprintf( filepath, MAX_FILEPATH_LEN, "%s/%4.4d-%2.2d-%2.2d/%4.4d-%2.2d-%2.2d-%2.2d-%2.2d-%2.2d-%2.2d.%s",
+					root_directory, tm.tm_year+1900, tm.tm_mon+1, tm.tm_mday, tm.tm_year+1900, tm.tm_mon+1, tm.tm_mday, tm.tm_hour,
+					tm.tm_min, tm.tm_sec, (int)(clock->tv_nsec / 10000000), suffix );
+	}
+
+	return filepath;
+}
+
 
 static void main_loop( encoder_funcs_t* encoder )
 {
+	// Pre-calculate factor for converting from ringbuffer size to length of
+	// buffered audio in nanoseconds
+	int audio_ns = 1000000000 / ( sizeof( jack_default_audio_sample_t ) * sample_rate );
 	
 	while( running ) {
-		time_t this_hour = start_of_hour();
-		
+		struct timespec now;
+		time_t this_hour;
+
+		// Get the current time
+		clock_gettime(CLOCK_REALTIME, &now);
+
+		// Subtract duration of currently-buffered audio
+	        now.tv_nsec -= jack_ringbuffer_read_space( ringbuffer[0] ) * audio_ns;
+	        if(now.tv_nsec < 0) {
+			now.tv_sec--;
+			now.tv_nsec += 1000000000;
+		}
+
+		// Calculate start-of-hour timestamp
+		this_hour = start_of_hour( now.tv_sec );
 
 		// Time to change file?
-		if (file_start != this_hour) {
+		if (file_start < this_hour) {
 			char* filepath = NULL;
 			if (file_layout[0] == 'h' || file_layout[0] == 'H') {
-				filepath = time_to_filepath_hierarchy( this_hour, encoder->file_suffix );
+				filepath = time_to_filepath_hierarchy( &now, encoder->file_suffix );
 			} else if (file_layout[0] == 'f' || file_layout[0] == 'F') {
-				filepath = time_to_filepath_flat( this_hour, encoder->file_suffix );
+				filepath = time_to_filepath_flat( &now, encoder->file_suffix );
 			} else if (file_layout[0] == 'c' || file_layout[0] == 'C') {
-				filepath = time_to_filepath_combo( this_hour, encoder->file_suffix );
+				filepath = time_to_filepath_combo( &now, encoder->file_suffix );
 			} else if (file_layout[0] == 'd' || file_layout[0] == 'D') {
-				filepath = time_to_filepath_dailydir( this_hour, encoder->file_suffix );
+				filepath = time_to_filepath_dailydir( &now, encoder->file_suffix );
+			} else if (file_layout[0] == 'a' || file_layout[0] == 'A') {
+				filepath = time_to_filepath_accurate( &now, encoder->file_suffix );
 			} else {
 				rotter_fatal("Unknown file layout: %s", file_layout);
 			}
@@ -450,6 +523,7 @@ static void usage()
 	printf("   -d <hours>    Delete files in directory older than this\n");
 	printf("   -R <secs>     Length of the ring buffer (in seconds)\n");
 	printf("   -L <layout>   File layout (default 'hierarchy')\n");
+	printf("   -u            Use UTC rather than local time in filenames\n");
 	printf("   -j            Don't automatically start jackd\n");
 	printf("   -v            Enable verbose mode\n");
 	printf("   -q            Enable quiet mode\n");
@@ -459,6 +533,7 @@ static void usage()
 	printf("   hierarchy     /root_directory/YYYY/MM/DD/HH/archive.suffix\n");
 	printf("   combo         /root_directory/YYYY/MM/DD/HH/YYYY-MM-DD-HH.suffix\n");
 	printf("   dailydir      /root_directory/YYYY-MM-DD/YYYY-MM-DD-HH.suffix\n");
+	printf("   accurate      /root_directory/YYYY-MM-DD/YYYY-MM-DD-HH-mm-ss-uu.suffix\n");
 	
 	// Display the available audio output formats
 	printf("\nSupported audio output formats:\n");
@@ -490,7 +565,7 @@ int main(int argc, char *argv[])
 	setbuf(stdout, NULL);
 
 	// Parse Switches
-	while ((opt = getopt(argc, argv, "al:r:n:N:jf:b:d:c:R:L:vqh")) != -1) {
+	while ((opt = getopt(argc, argv, "al:r:n:N:jf:b:d:c:R:L:uvqh")) != -1) {
 		switch (opt) {
 			case 'a':  autoconnect = 1; break;
 			case 'l':  connect_left = optarg; break;
@@ -504,6 +579,7 @@ int main(int argc, char *argv[])
 			case 'c':  channels = atoi(optarg); break;
 			case 'R':  rb_duration = atof(optarg); break;
 			case 'L':  file_layout = optarg; break;
+			case 'u':  utc = 1; break;
 			case 'v':  verbose = 1; break;
 			case 'q':  quiet = 1; break;
 			default:  usage(); break;
